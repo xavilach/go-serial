@@ -119,3 +119,73 @@ func TestOpenAppliesFlowControl(t *testing.T) {
 		unix.Close(fd)
 	}
 }
+
+// A Write that waits for room must end when the port is closed, and so must a Break. Nothing
+// reads the other end of the pseudo terminal, so its queue fills up.
+func TestCloseReleasesABlockedWrite(t *testing.T) {
+	name := ptyPair(t)
+	p, err := Open(name, &Mode{BaudRate: 115200})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := make(chan error, 1)
+	go func() {
+		_, err := p.Write(make([]byte, 4<<20)) // far more than a queue holds
+		res <- err
+	}()
+	select {
+	case err := <-res:
+		t.Fatalf("the write did not block: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- p.Close() }()
+	for _, c := range []chan error{res, closed} {
+		select {
+		case err := <-c:
+			if c == res {
+				if pe, ok := err.(*PortError); !ok || pe.Code() != PortClosed {
+					t.Errorf("write ended with %v, want PortClosed", err)
+				}
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("the blocked write survived Close")
+		}
+	}
+}
+
+func TestCloseEndsABreakAndNothingTouchesTheDescriptorAfterwards(t *testing.T) {
+	name := ptyPair(t)
+	p, err := Open(name, &Mode{BaudRate: 115200})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := make(chan error, 1)
+	go func() { res <- p.Break(5 * time.Second) }()
+	time.Sleep(100 * time.Millisecond)
+	start := time.Now()
+	_ = p.Close()
+	select {
+	case err := <-res:
+		if pe, ok := err.(*PortError); !ok || pe.Code() != PortClosed {
+			t.Errorf("break ended with %v, want PortClosed", err)
+		}
+		if time.Since(start) > time.Second {
+			t.Error("Close waited for the break")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the break survived Close")
+	}
+	// Every operation on a closed port fails cleanly.
+	for name, err := range map[string]error{
+		"SetDTR": p.SetDTR(true), "SetRTS": p.SetRTS(true), "Break": p.Break(time.Millisecond),
+		"ResetInputBuffer": p.ResetInputBuffer(), "SetMode": p.SetMode(&Mode{BaudRate: 9600}),
+	} {
+		if pe, ok := err.(*PortError); !ok || pe.Code() != PortClosed {
+			t.Errorf("%s after Close: %v, want PortClosed", name, err)
+		}
+	}
+	if _, err := p.Write([]byte("x")); err == nil {
+		t.Error("write after Close succeeded")
+	}
+}

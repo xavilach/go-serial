@@ -22,6 +22,9 @@ import (
 
 type unixPort struct {
 	handle int
+	// modemLock makes SetDTR and SetRTS (a read, then a write, of the modem bits) atomic with
+	// respect to each other.
+	modemLock sync.Mutex
 
 	readTimeout time.Duration
 	closeLock   sync.RWMutex
@@ -34,26 +37,35 @@ func (port *unixPort) Close() error {
 		return nil
 	}
 
-	// Close port
-	port.releaseExclusiveAccess()
-	if err := unix.Close(port.handle); err != nil {
-		return err
+	if port.closeSignal != nil {
+		// Wake every pending Read, Write and Break (if any)...
+		port.closeSignal.Write([]byte{0})
 	}
 
+	// ...and wait until each of them has returned, so that none can touch the descriptor after
+	// it is closed, when the number may already belong to another port.
+	port.closeLock.Lock()
+	defer port.closeLock.Unlock()
+
+	port.releaseExclusiveAccess()
+	err := unix.Close(port.handle)
 	if port.closeSignal != nil {
-		// Send close signal to all pending reads (if any)
-		port.closeSignal.Write([]byte{0})
-
-		// Wait for all readers to complete
-		port.closeLock.Lock()
-		defer port.closeLock.Unlock()
-
-		// Close signaling pipe
-		if err := port.closeSignal.Close(); err != nil {
-			return err
+		if cerr := port.closeSignal.Close(); err == nil {
+			err = cerr
 		}
 	}
-	return nil
+	return err
+}
+
+// use marks the descriptor as in use until the returned function is called, so that Close waits
+// for the caller. It fails with PortClosed once the port has been closed.
+func (port *unixPort) use() (func(), error) {
+	port.closeLock.RLock()
+	if atomic.LoadUint32(&port.opened) != 1 {
+		port.closeLock.RUnlock()
+		return nil, &PortError{code: PortClosed}
+	}
+	return port.closeLock.RUnlock, nil
 }
 
 func (port *unixPort) Read(p []byte) (int, error) {
@@ -93,7 +105,7 @@ func (port *unixPort) Read(p []byte) (int, error) {
 			return 0, nil
 		}
 		n, err := unix.Read(port.handle, p)
-		if err == unix.EINTR {
+		if err == unix.EINTR || err == unix.EAGAIN {
 			continue
 		}
 		// Linux: when the port is disconnected during a read operation
@@ -109,29 +121,71 @@ func (port *unixPort) Read(p []byte) (int, error) {
 	}
 }
 
+// Write writes all of p. It waits for room in the output queue (the other end may have stopped
+// reading, or flow control may hold the line) and gives up with PortClosed when the port is
+// closed meanwhile; n then says how much was written.
 func (port *unixPort) Write(p []byte) (n int, err error) {
-	n, err = unix.Write(port.handle, p)
-	if n < 0 { // Do not return -1 unix errors
-		n = 0
+	release, err := port.use()
+	if err != nil {
+		return 0, err
 	}
-	return
+	defer release()
+	for n < len(p) {
+		m, err := unix.Write(port.handle, p[n:])
+		if m > 0 {
+			n += m
+		}
+		switch err {
+		case nil, unix.EINTR:
+			continue
+		case unix.EAGAIN:
+			// The queue is full: wait until the descriptor can take more, or the port is closed.
+			res, err := unixutils.Select(unixutils.NewFDSet(port.closeSignal.ReadFD()), unixutils.NewFDSet(port.handle), nil, -1)
+			if err == unix.EINTR {
+				continue
+			}
+			if err != nil {
+				return n, err
+			}
+			if res.IsReadable(port.closeSignal.ReadFD()) {
+				return n, &PortError{code: PortClosed}
+			}
+		default:
+			return n, err
+		}
+	}
+	return n, nil
 }
 
+// Break holds the break condition for t. A Close during the break ends it at once; the break is
+// always cleared before Break returns.
 func (port *unixPort) Break(t time.Duration) error {
+	release, err := port.use()
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := unix.IoctlSetInt(port.handle, ioctlTiocsbrk, 0); err != nil {
 		return err
 	}
 
-	time.Sleep(t)
+	res, selErr := unixutils.Select(unixutils.NewFDSet(port.closeSignal.ReadFD()), nil, nil, t)
 
 	if err := unix.IoctlSetInt(port.handle, ioctlTioccbrk, 0); err != nil {
 		return err
 	}
-
+	if selErr == nil && res.IsReadable(port.closeSignal.ReadFD()) {
+		return &PortError{code: PortClosed}
+	}
 	return nil
 }
 
 func (port *unixPort) SetMode(mode *Mode) error {
+	release, err := port.use()
+	if err != nil {
+		return err
+	}
+	defer release()
 	settings, err := port.getTermSettings()
 	if err != nil {
 		return err
@@ -166,6 +220,13 @@ func (port *unixPort) SetMode(mode *Mode) error {
 }
 
 func (port *unixPort) SetDTR(dtr bool) error {
+	release, err := port.use()
+	if err != nil {
+		return err
+	}
+	defer release()
+	port.modemLock.Lock()
+	defer port.modemLock.Unlock()
 	status, err := port.getModemBitsStatus()
 	if err != nil {
 		return err
@@ -179,6 +240,13 @@ func (port *unixPort) SetDTR(dtr bool) error {
 }
 
 func (port *unixPort) SetRTS(rts bool) error {
+	release, err := port.use()
+	if err != nil {
+		return err
+	}
+	defer release()
+	port.modemLock.Lock()
+	defer port.modemLock.Unlock()
 	status, err := port.getModemBitsStatus()
 	if err != nil {
 		return err
@@ -200,6 +268,11 @@ func (port *unixPort) SetReadTimeout(timeout time.Duration) error {
 }
 
 func (port *unixPort) GetModemStatusBits() (*ModemStatusBits, error) {
+	release, err := port.use()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	status, err := port.getModemBitsStatus()
 	if err != nil {
 		return nil, err
@@ -276,7 +349,8 @@ func nativeOpen(portName string, mode *Mode) (*unixPort, error) {
 		return nil, &PortError{code: InvalidSerialPort, causedBy: fmt.Errorf("error configuring port: %w", err)}
 	}
 
-	unix.SetNonblock(h, false)
+	// Non-blocking, so that a Write can wait for room in a way Close can interrupt.
+	unix.SetNonblock(h, true)
 
 	port.acquireExclusiveAccess()
 

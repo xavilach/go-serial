@@ -11,9 +11,19 @@ package serial
 import "golang.org/x/sys/unix"
 
 func (port *unixPort) ResetInputBuffer() error {
+	release, err := port.use()
+	if err != nil {
+		return err
+	}
+	defer release()
 	return unix.IoctlSetInt(port.handle, ioctlTcflsh, unix.TCIFLUSH)
 }
 
 func (port *unixPort) ResetOutputBuffer() error {
+	release, err := port.use()
+	if err != nil {
+		return err
+	}
+	defer release()
 	return unix.IoctlSetInt(port.handle, ioctlTcflsh, unix.TCOFLUSH)
 }

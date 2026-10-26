@@ -38,9 +38,19 @@ func (port *unixPort) setSpecialBaudrate(speed uint32) error {
 }
 
 func (port *unixPort) ResetInputBuffer() error {
+	release, err := port.use()
+	if err != nil {
+		return err
+	}
+	defer release()
 	return unix.IoctlSetPointerInt(port.handle, ioctlTcflsh, unix.TCIFLUSH)
 }
 
 func (port *unixPort) ResetOutputBuffer() error {
+	release, err := port.use()
+	if err != nil {
+		return err
+	}
+	defer release()
 	return unix.IoctlSetPointerInt(port.handle, ioctlTcflsh, unix.TCOFLUSH)
 }
