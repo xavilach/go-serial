@@ -19,3 +19,7 @@ This software is released under the [BSD 3-clause license].
 [contributors]: https://github.com/bugst/go-serial/graphs/contributors
 [BSD 3-clause license]: https://github.com/bugst/go-serial/blob/master/LICENSE
 
+
+## Regarde fork
+
+This fork of `bugst/go-serial` (base: v1.8.0) adds `Mode.FlowControl` (`NoFlowControl`, `RTSCTSFlowControl`, `XONXOFFFlowControl`) for Linux, the BSDs and macOS (termios) and Windows (DCB flags). The zero value keeps the old behavior: no flow control. It is used by [Regarde](https://github.com/xavilach/regarde) through a `replace` directive. Tests: `flow_linux_test.go` (needs `socat`) and `flow_windows_test.go`.

@@ -182,11 +182,28 @@ func (port *windowsPort) SetMode(mode *Mode) error {
 		return &PortError{code: InvalidSerialPort}
 	}
 	port.setModeParams(mode, &params)
+	applyFlowControl(mode.FlowControl, &params)
 	if windows.SetCommState(port.handle, &params) != nil {
 		port.Close()
 		return &PortError{code: InvalidSerialPort}
 	}
 	return nil
+}
+
+// applyFlowControl sets the DCB flags of the handshaking mode. It first clears every flag of
+// the other modes, and hands RTS back to the program if it was under hardware control.
+func applyFlowControl(f FlowControl, params *windows.DCB) {
+	params.Flags &^= dcbOutXCTSFlow | dcbInX | dcbOutX
+	if params.Flags&^dcbRTSControlDisableMask == dcbRTSControlHandshake {
+		params.Flags = params.Flags&dcbRTSControlDisableMask | dcbRTSControlEnable
+	}
+	switch f {
+	case RTSCTSFlowControl:
+		params.Flags |= dcbOutXCTSFlow
+		params.Flags = params.Flags&dcbRTSControlDisableMask | dcbRTSControlHandshake
+	case XONXOFFFlowControl:
+		params.Flags |= dcbInX | dcbOutX
+	}
 }
 
 func (port *windowsPort) setModeParams(mode *Mode, params *windows.DCB) {
@@ -409,12 +426,10 @@ func nativeOpen(portName string, mode *Mode) (*windowsPort, error) {
 			params.Flags |= windows.RTS_CONTROL_ENABLE
 		}
 	}
-	params.Flags &^= dcbOutXCTSFlow
 	params.Flags &^= dcbOutXDSRFlow
 	params.Flags &^= dcbDSRSensitivity
 	params.Flags |= dcbTXContinueOnXOFF
-	params.Flags &^= dcbInX
-	params.Flags &^= dcbOutX
+	applyFlowControl(mode.FlowControl, params)
 	params.Flags &^= dcbErrorChar
 	params.Flags &^= dcbNull
 	params.Flags &^= dcbAbortOnError

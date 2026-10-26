@@ -100,8 +100,24 @@ type Mode struct {
 	DataBits          int              // Size of the character (must be 5, 6, 7 or 8)
 	Parity            Parity           // Parity (see Parity type for more info)
 	StopBits          StopBits         // Stop bits (see StopBits type for more info)
+	FlowControl       FlowControl      // Handshaking, none by default (zero value)
 	InitialStatusBits *ModemOutputBits // Initial output modem bits status (if nil defaults to DTR=true and RTS=true)
 }
+
+// FlowControl describes the handshaking of a serial port. The zero value is no flow control,
+// which is what earlier versions of this library always did.
+type FlowControl int
+
+const (
+	// NoFlowControl disables hardware and software flow control (default)
+	NoFlowControl FlowControl = iota
+	// RTSCTSFlowControl is hardware flow control with the RTS and CTS lines. The driver then owns
+	// the RTS line: setting it by hand is not allowed (SetRTS fails on Windows).
+	RTSCTSFlowControl
+	// XONXOFFFlowControl is software flow control with the XON (DC1) and XOFF (DC3) characters,
+	// in both directions.
+	XONXOFFFlowControl
+)
 
 // Parity describes a serial port parity setting
 type Parity int

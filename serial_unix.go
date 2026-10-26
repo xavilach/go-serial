@@ -151,6 +151,7 @@ func (port *unixPort) SetMode(mode *Mode) error {
 	} else if special {
 		requireSpecialBaudrate = true
 	}
+	setTermSettingsFlowControl(mode.FlowControl, settings)
 	if err := port.setTermSettings(settings); err != nil {
 		return err
 	}
@@ -239,7 +240,7 @@ func nativeOpen(portName string, mode *Mode) (*unixPort, error) {
 	setRawMode(settings)
 
 	// Explicitly disable RTS/CTS flow control
-	setTermSettingsCtsRts(false, settings)
+	setTermSettingsFlowControl(mode.FlowControl, settings)
 
 	if err = port.setTermSettings(settings); err != nil {
 		port.Close()
@@ -392,6 +393,15 @@ func setTermSettingsStopBits(bits StopBits, settings *unix.Termios) error {
 		return &PortError{code: InvalidStopBits}
 	}
 	return nil
+}
+
+func setTermSettingsFlowControl(f FlowControl, settings *unix.Termios) {
+	setTermSettingsCtsRts(f == RTSCTSFlowControl, settings)
+	if f == XONXOFFFlowControl {
+		settings.Iflag |= unix.IXON | unix.IXOFF
+	} else {
+		settings.Iflag &^= unix.IXON | unix.IXOFF
+	}
 }
 
 func setTermSettingsCtsRts(enable bool, settings *unix.Termios) {
