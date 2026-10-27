@@ -169,12 +169,33 @@ func (port *unixPort) Break(t time.Duration) error {
 		return err
 	}
 
-	res, selErr := unixutils.Select(unixutils.NewFDSet(port.closeSignal.ReadFD()), nil, nil, t)
+	// Wait for the whole duration. A signal (EINTR) only interrupts the wait; the rest is waited
+	// out, so the break is never shorter than asked.
+	deadline := time.Now().Add(t)
+	var closed bool
+	var selErr error
+	for {
+		left := time.Until(deadline)
+		if left < 0 {
+			left = 0
+		}
+		res, err := unixutils.Select(unixutils.NewFDSet(port.closeSignal.ReadFD()), nil, nil, left)
+		if err == unix.EINTR {
+			continue
+		}
+		selErr = err
+		closed = err == nil && res.IsReadable(port.closeSignal.ReadFD())
+		break
+	}
 
+	// The break is cleared whatever ended the wait.
 	if err := unix.IoctlSetInt(port.handle, ioctlTioccbrk, 0); err != nil {
 		return err
 	}
-	if selErr == nil && res.IsReadable(port.closeSignal.ReadFD()) {
+	if selErr != nil {
+		return selErr
+	}
+	if closed {
 		return &PortError{code: PortClosed}
 	}
 	return nil
